@@ -1,5 +1,5 @@
 name: Build WRT
-run-name: Build - ${{ inputs.model }}
+run-name: Build - ${{ inputs.model || 'x64_immwrt' }}
 
 on:
   workflow_dispatch:
@@ -35,6 +35,9 @@ on:
         required: false
         description: Remove default config fragments, comma separated
         default: ""
+  schedule:
+    # 每天北京时间 06:00 (UTC 22:00) 自动构建
+    - cron: '0 22 * * *'
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -81,12 +84,16 @@ jobs:
           sudo -E timedatectl set-timezone "Asia/Shanghai"
           export BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          # schedule 触发时无 inputs，使用默认设备型号
+          MODEL="${{ inputs.model || 'x64_immwrt' }}"
+          echo "TARGET_MODEL=$MODEL" >> $GITHUB_ENV
+          echo "Building model: $MODEL (event: ${{ github.event_name }})"
           sanitize_cache_key_part() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'; }
           echo "ADD_CONFIG_FRAGMENTS_KEY=$(sanitize_cache_key_part "$RAW_ADD_CONFIG_FRAGMENTS")" >> $GITHUB_ENV
           echo "REMOVE_CONFIG_FRAGMENTS_KEY=$(sanitize_cache_key_part "$RAW_REMOVE_CONFIG_FRAGMENTS")" >> $GITHUB_ENV
 
       - name: Pre Clone
-        run: ./wrt_core/pre_clone_action.sh ${{ inputs.model }}
+        run: ./wrt_core/pre_clone_action.sh ${{ env.TARGET_MODEL }}
 
       - name: Cache Dependencies
         uses: actions/cache@v6.1.0
@@ -94,10 +101,10 @@ jobs:
           path: |
             ./action_build/.ccache
             ./action_build/staging_dir
-          key: ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.ADD_CONFIG_FRAGMENTS_KEY }}-${{ env.REMOVE_CONFIG_FRAGMENTS_KEY }}-${{ env.BUILD_DATE }}
+          key: ${{ matrix.os }}-${{ env.TARGET_MODEL }}-${{ hashFiles('**/repo_flag') }}-${{ env.ADD_CONFIG_FRAGMENTS_KEY }}-${{ env.REMOVE_CONFIG_FRAGMENTS_KEY }}-${{ env.BUILD_DATE }}
           restore-keys: |
-            ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.ADD_CONFIG_FRAGMENTS_KEY }}-${{ env.REMOVE_CONFIG_FRAGMENTS_KEY }}-
-            ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}-
+            ${{ matrix.os }}-${{ env.TARGET_MODEL }}-${{ hashFiles('**/repo_flag') }}-${{ env.ADD_CONFIG_FRAGMENTS_KEY }}-${{ env.REMOVE_CONFIG_FRAGMENTS_KEY }}-
+            ${{ matrix.os }}-${{ env.TARGET_MODEL }}-${{ hashFiles('**/repo_flag') }}-
 
       - name: Refresh the cache
         run: |
@@ -138,12 +145,12 @@ jobs:
         env:
           ADD_CONFIG_FRAGMENTS: ${{ inputs.add_fragments }}
           REMOVE_CONFIG_FRAGMENTS: ${{ inputs.remove_fragments }}
-        run: ./build.sh ${{ inputs.model }}
+        run: ./build.sh ${{ env.TARGET_MODEL }}
 
       - name: Delete Old Cache
         run: |
           # 获取缓存列表并删除
-          gh cache list --key ${{ matrix.os }}-${{ inputs.model }}-${{ hashFiles('**/repo_flag') }}- --json key --jq '.[] | .key' | while read -r key; do
+          gh cache list --key ${{ matrix.os }}-${{ env.TARGET_MODEL }}-${{ hashFiles('**/repo_flag') }}- --json key --jq '.[] | .key' | while read -r key; do
             gh cache delete "$key"
           done
           # 输出缓存状态
@@ -180,5 +187,5 @@ jobs:
       - name: Upload Firmware
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: ${{ env.BUILD_DATE }}_${{ inputs.model }}
+          name: ${{ env.BUILD_DATE }}_${{ env.TARGET_MODEL }}
           path: ./firmware/*.*

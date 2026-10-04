@@ -1,5 +1,7 @@
 # 编译指南
 
+> 基于 [ZqinKing/wrt_release](https://github.com/ZqinKing/wrt_release) 项目编译，新增每日定时自动构建（北京时间 19:00）。
+
 本仓库用于按设备配置自动拉取 OpenWrt / ImmortalWrt / LiBwrt 源码、应用自定义补丁与软件包配置，并输出固件到 `firmware/` 目录。
 
 ## 1. 环境准备

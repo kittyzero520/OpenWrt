@@ -1,0 +1,178 @@
+name: Daily Rotation Release
+run-name: Daily Rotation
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 设备列表（空格分隔，留空=按星期轮换）
+        required: false
+        default: ""
+  schedule:
+    # 每天北京时间 19:00 自动轮换编译（GitHub 可能延迟数小时）
+    - cron: '0 11 * * *'
+
+permissions:
+  contents: write   # 创建 Release 和 tag
+  actions: write    # gh cache delete 清理缓存
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      models: ${{ steps.plan.outputs.models }}
+    steps:
+      - name: 计算今天的设备列表
+        id: plan
+        run: |
+          # 按星期轮换分类（北京时间，1=周一 ... 7=周日）
+          # 想调整分类直接改这里的 case 分支即可
+          case "$(TZ=Asia/Shanghai date +%u)" in
+            1) MODELS="jdcloud_ipq60xx_immwrt jdcloud_ipq60xx_libwrt jdcloud_ax6000_immwrt";;      # 周一：京东云
+            2) MODELS="redmi_ax5_immwrt redmi_ax6_immwrt redmi_ax6_libwrt redmi_ax6000_immwrt21";; # 周二：红米
+            3) MODELS="aliyun_ap8220_immwrt aliyun_ap8220_libwrt qihoo_360v6_immwrt";;             # 周三：阿里云/奇虎
+            4) MODELS="cmcc_rax3000m_immwrt linksys_mx4x00_immwrt link_nn6000v2_immwrt";;          # 周四：运营商/Linksys
+            5) MODELS="zn_m2_immwrt zn_m2_libwrt gemtek_w1701k_immwrt";;                           # 周五：兆能/Gemtek
+            6) MODELS="n1_immwrt";;                                                                # 周六：斐讯N1
+            7) MODELS="";;                                                                         # 周日：休息（x64 每日已单独构建）
+          esac
+          # 手动触发时可覆盖
+          EXTRA="${{ inputs.models }}"
+          [ -n "$EXTRA" ] && MODELS="$EXTRA"
+          echo "今天($(TZ=Asia/Shanghai date '+%A'))编译: $MODELS"
+          MODELS_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$MODELS")
+          echo "models=$MODELS_JSON" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.models != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        model: ${{ fromJSON(needs.plan.outputs.models) }}
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /usr/share/swift || true
+          sudo rm -rf "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          docker system prune -af || true
+          sudo -E apt-get autoremove --purge -y || true
+          sudo -E apt-get clean || true
+          df -hT
+
+      - name: Build System Setup
+        run: |
+          sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          sudo -E apt -yqq install dos2unix
+          sudo -E apt -yqq install libfuse-dev
+          sudo -E apt -yqq autoremove --purge
+          sudo -E apt -yqq autoclean
+          sudo -E apt -yqq clean
+          sudo -E systemctl daemon-reload
+
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Set Build Date and Timezone
+        run: |
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+          echo "BUILD_DATE=$(TZ=UTC-8 date +"%y.%m.%d_%H.%M.%S")" >> $GITHUB_ENV
+          echo "TARGET_MODEL=${{ matrix.model }}" >> $GITHUB_ENV
+          echo "Building: ${{ matrix.model }}"
+
+      - name: Pre Clone
+        run: ./wrt_core/pre_clone_action.sh ${{ matrix.model }}
+
+      - name: Cache Dependencies
+        uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ./action_build/.ccache
+            ./action_build/staging_dir
+          key: ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-${{ env.BUILD_DATE }}
+          restore-keys: |
+            ubuntu-24.04-${{ matrix.model }}-${{ hashFiles('**/repo_flag') }}-
+            ubuntu-24.04-${{ matrix.model }}-
+
+      - name: Refresh the cache
+        run: |
+          if [ -d "./action_build/staging_dir" ]; then
+            find "./action_build/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
+                find "$dir" -type f -exec touch {} +
+            done
+          fi
+
+      - name: Build Firmware
+        run: ./build.sh ${{ matrix.model }}
+
+      - name: Get Kernel Verion
+        run: |
+          echo "KVER=$(grep -oP "^kernel.*" ./firmware/*.manifest | grep -oP "[4-6]\.[0-9]{1,3}\.[0-9]{1,3}")" >> $GITHUB_ENV
+
+      - name: Delete Old Cache
+        continue-on-error: true
+        run: |
+          gh cache list --key ubuntu-24.04-${{ matrix.model }}- --json key --jq '.[] | .key' | while read -r key; do
+            gh cache delete "$key" || echo "skip: $key (可能已过期)"
+          done
+
+      - name: Package Kmods
+        run: |
+          if [ ! -d "./action_build/bin" ]; then
+            echo "kmod source directory not found: ./action_build/bin" >&2
+            exit 1
+          fi
+          KMOD_LIST=$(mktemp)
+          trap 'rm -f "$KMOD_LIST"' EXIT
+          (
+            cd ./action_build/bin
+            find . -type f \( -name "kmod*.ipk" -o -name "kmod*.apk" \) -print | sort > "$KMOD_LIST"
+          )
+          if [ ! -s "$KMOD_LIST" ]; then
+            echo "No kmod packages found under ./action_build/bin" >&2
+            exit 1
+          fi
+          kmod_count=$(wc -l < "$KMOD_LIST" | tr -d '[:space:]')
+          archive_name="kmods_${{ matrix.model }}_${KVER:-unknown-kernel}_${BUILD_DATE}.tar.gz"
+          tar -C ./action_build/bin -czf "$archive_name" -T "$KMOD_LIST"
+          echo "KMOD_ARCHIVE=$archive_name" >> "$GITHUB_ENV"
+          echo "Packaged $kmod_count kmod packages into $archive_name"
+
+      - name: Package OpenWrt Firmware (N1)
+        if: ${{ matrix.model == 'n1_immwrt' }}
+        uses: unifreq/openwrt_packit@8007d3efd49bb42aa20c5755a50af21dc7a438e1
+        env:
+          OPENWRT_ARMVIRT: firmware/*.tar.gz
+          PACKAGE_SOC: s905d
+          KERNEL_VERSION_NAME: 6.6.y
+          WHOAMI: kittyzero520
+
+      - name: Prepare Release Body
+        run: |
+          echo "云编译发布（每日轮换）" > release_body.txt
+          echo "设备: ${{ matrix.model }}" >> release_body.txt
+          echo "Kernel: ${{ env.KVER }}" >> release_body.txt
+          echo "WIFI密码: 12345678" >> release_body.txt
+          echo "LAN地址: 192.168.1.1" >> release_body.txt
+          echo "插件：" >> release_body.txt
+          echo "$(grep -oP "luci-app(-[a-zA-Z0-9]{1,}){1,}" ./firmware/*.manifest | awk -F":" '{print $NF}')"  >> release_body.txt
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@v3.0.1
+        with:
+          tag_name: ${{ env.BUILD_DATE }}_${{ matrix.model }}
+          files: |
+            ${{ matrix.model == 'n1_immwrt' && env.PACKAGED_OUTPUTPATH || './firmware' }}/*.*
+            ./kmods_*.tar.gz
+          fail_on_unmatched_files: true
+          body_path: ./release_body.txt

@@ -148,10 +148,11 @@ jobs:
         run: ./build.sh ${{ env.TARGET_MODEL }}
 
       - name: Delete Old Cache
+        continue-on-error: true
         run: |
-          # 获取缓存列表并删除
-          gh cache list --key ${{ matrix.os }}-${{ env.TARGET_MODEL }}-${{ hashFiles('**/repo_flag') }}- --json key --jq '.[] | .key' | while read -r key; do
-            gh cache delete "$key"
+          # 获取缓存列表并删除（不用 hashFiles：编译后工作区文件过多会超时）
+          gh cache list --key ${{ matrix.os }}-${{ env.TARGET_MODEL }}- --json key --jq '.[] | .key' | while read -r key; do
+            gh cache delete "$key" || echo "skip: $key (可能已过期)"
           done
           # 输出缓存状态
           echo "========cache status========"

@@ -39,6 +39,10 @@ on:
     # 每天北京时间 19:30 (UTC 11:30) 自动构建
     - cron: '30 11 * * *'
 
+permissions:
+  contents: read
+  actions: write    # gh cache delete 清理缓存
+
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

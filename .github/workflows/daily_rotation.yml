@@ -37,7 +37,7 @@ jobs:
             4) MODELS="cmcc_rax3000m_immwrt linksys_mx4x00_immwrt link_nn6000v2_immwrt";;          # 周四：运营商/Linksys
             5) MODELS="zn_m2_immwrt zn_m2_libwrt gemtek_w1701k_immwrt";;                           # 周五：兆能/Gemtek
             6) MODELS="n1_immwrt";;                                                                # 周六：斐讯N1
-            7) MODELS="";;                                                                         # 周日：休息（x64 每日已单独构建）
+            7) MODELS="";;                                                                         # 周日：休息（x64 由原有 workflow 单独在周日构建）
           esac
           # 手动触发时可覆盖
           EXTRA="${{ inputs.models }}"

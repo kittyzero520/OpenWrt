@@ -36,8 +36,8 @@ on:
         description: Remove default config fragments, comma separated
         default: ""
   schedule:
-    # 每天北京时间 19:30 (UTC 11:30) 自动构建
-    - cron: '30 11 * * *'
+    # 每周日北京时间 19:30 (UTC 11:30) 自动构建 x64
+    - cron: '30 11 * * 0'
 
 permissions:
   contents: read
